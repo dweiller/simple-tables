@@ -12,6 +12,8 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(mod_unit_tests).step);
+
+    b.default_step = test_step;
 }
 
 const std = @import("std");

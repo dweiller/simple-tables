@@ -17,11 +17,11 @@ pub const Options = struct {
 };
 
 pub fn format(
-    writer: anytype,
+    writer: *std.Io.Writer,
     comptime spec: []const Column,
     options: Options,
     data: anytype,
-) @TypeOf(writer).Error!void {
+) std.Io.Writer.Error!void {
     const type_info = @typeInfo(@TypeOf(data));
     if (type_info != .array and (type_info != .pointer or type_info.pointer.size != .slice)) {
         @compileError("expected slice or array of data rows, got " ++ @typeName(@TypeOf(data)));
@@ -52,49 +52,49 @@ pub fn format(
     };
 
     if (options.title) |title| {
-        try writer.writeByteNTimes(' ', options.left_margin);
+        try writer.splatByteAll(' ', options.left_margin);
         try formatTitle(writer, row_width, title);
         if (options.header_underline) |b| {
-            try writer.writeByteNTimes(' ', options.left_margin);
-            try writer.writeBytesNTimes(b, row_width);
+            try writer.splatByteAll(' ', options.left_margin);
+            try writer.splatBytesAll(b, row_width);
             try writer.writeByte('\n');
         } else {
             try writer.writeByte('\n');
         }
     }
 
-    try writer.writeByteNTimes(' ', margin + options.left_margin);
+    try writer.splatByteAll(' ', margin + options.left_margin);
     try formatHeader(writer, spec, col_widths, options.column_padding);
     if (options.header_underline) |b| {
-        try writer.writeByteNTimes(' ', options.left_margin);
-        try writer.writeBytesNTimes(b, row_width);
+        try writer.splatByteAll(' ', options.left_margin);
+        try writer.splatBytesAll(b, row_width);
         try writer.writeByte('\n');
     } else {
         try writer.writeByte('\n');
     }
     for (data) |d| {
-        try writer.writeByteNTimes(' ', margin + options.left_margin);
+        try writer.splatByteAll(' ', margin + options.left_margin);
         try formatRow(writer, spec, col_widths, options.column_padding, d);
     }
 }
 
 pub fn formatTitle(
-    writer: anytype,
+    writer: *std.Io.Writer,
     width: usize,
     title: []const u8,
-) @TypeOf(writer).Error!void {
+) std.Io.Writer.Error!void {
     const padding = (1 + width - title.len) / 2;
-    try writer.writeByteNTimes(' ', padding);
+    try writer.splatByteAll(' ', padding);
     try writer.writeAll(title);
     try writer.writeByte('\n');
 }
 
 pub fn formatHeader(
-    writer: anytype,
+    writer: *std.Io.Writer,
     comptime spec: []const Column,
     width: [spec.len]ColumnSize,
     column_padding: usize,
-) @TypeOf(writer).Error!void {
+) std.Io.Writer.Error!void {
     for (spec, 0..) |column, i| {
         const padding = switch (column.alignment) {
             .left, .middle, .right => width[i].total,
@@ -104,20 +104,20 @@ pub fn formatHeader(
         const left_pad = padding / 2;
         const right_pad = (padding + 1) / 2;
 
-        try writer.writeByteNTimes(' ', left_pad + if (i == 0) 0 else column_padding);
+        try writer.splatByteAll(' ', left_pad + if (i == 0) 0 else column_padding);
         try writer.writeAll(column.header);
-        try writer.writeByteNTimes(' ', right_pad);
+        try writer.splatByteAll(' ', right_pad);
     }
     try writer.writeByte('\n');
 }
 
 pub fn formatRow(
-    writer: anytype,
+    writer: *std.Io.Writer,
     comptime spec: []const Column,
     width: [spec.len]ColumnSize,
     column_padding: usize,
     args: anytype,
-) @TypeOf(writer).Error!void {
+) std.Io.Writer.Error!void {
     const ArgsType = @TypeOf(args);
     const args_type_info = @typeInfo(ArgsType);
     if (args_type_info != .@"struct") {
@@ -129,7 +129,7 @@ pub fn formatRow(
     comptime var arg_index = 0;
 
     inline for (spec, 0..) |column, i| {
-        const placeholder = comptime std.fmt.Placeholder.parse(extractPlaceholder(column.fmt)[0..].*);
+        const placeholder = comptime std.fmt.Placeholder.parse(extractPlaceholder(column.fmt));
         const arg_pos = switch (placeholder.arg) {
             .none => blk: {
                 defer arg_index += 1;
@@ -151,28 +151,27 @@ pub fn formatRow(
             .right => .{ padding, 0 },
             .middle => .{ padding / 2, (padding + 1) / 2 },
             .separator => |sep| blk: {
-                var index_writer = indexOfWriter(std.io.null_writer, sep);
-                index_writer.writer().print(column.fmt, .{arg_value}) catch unreachable;
+                var buf: [128]u8 = undefined;
+                var index_writer: IndexOfWriter = .init(sep, &buf);
+                index_writer.interface.print(column.fmt, .{arg_value}) catch unreachable;
+                index_writer.interface.flush() catch unreachable;
+
                 if (index_writer.first_index) |index| {
                     break :blk .{
                         width[i].split[0] - index,
-                        width[i].split[1] - (index_writer.bytes_written - index),
+                        width[i].split[1] - (index_writer.count - index),
                     };
                 } else {
                     const total = width[i].split[0] + width[i].split[1] + 1;
-                    const pad = total - index_writer.bytes_written;
+                    const pad = total - index_writer.count;
                     break :blk .{ (pad + 1) / 2, pad / 2 };
                 }
             },
         };
 
-        try writer.writeByteNTimes(' ', left_pad + if (i == 0) 0 else column_padding);
-        try std.fmt.format(
-            writer,
-            column.fmt,
-            .{arg_value},
-        );
-        try writer.writeByteNTimes(' ', right_pad);
+        try writer.splatByteAll(' ', left_pad + if (i == 0) 0 else column_padding);
+        try writer.print(column.fmt, .{arg_value});
+        try writer.splatByteAll(' ', right_pad);
     }
     try writer.writeByte('\n');
 }
@@ -190,7 +189,7 @@ pub fn measureColumns(comptime spec: []const Column, data: anytype) [spec.len]Co
     var sizes: [spec.len]ColumnSize = undefined;
     comptime var arg_index = 0;
     inline for (&sizes, spec) |*size, column| {
-        const placeholder = comptime std.fmt.Placeholder.parse(extractPlaceholder(column.fmt)[0..].*);
+        const placeholder = comptime std.fmt.Placeholder.parse(extractPlaceholder(column.fmt));
         const arg_pos = switch (placeholder.arg) {
             .none => blk: {
                 defer arg_index += 1;
@@ -214,12 +213,14 @@ pub fn measureColumns(comptime spec: []const Column, data: anytype) [spec.len]Co
                     size.total = @max(size.total, len);
                 },
                 .separator => |sep| {
-                    var index_writer = indexOfWriter(std.io.null_writer, sep);
-                    index_writer.writer().print(column.fmt, .{arg_value}) catch unreachable;
+                    var buf: [128]u8 = undefined;
+                    var index_writer: IndexOfWriter = .init(sep, &buf);
+                    index_writer.interface.print(column.fmt, .{arg_value}) catch unreachable;
+                    index_writer.interface.flush() catch unreachable;
 
                     if (index_writer.first_index) |index| {
                         size.split[0] = @max(size.split[0], @as(u32, @truncate(index)));
-                        const right: u32 = @truncate(index_writer.bytes_written - index);
+                        const right: u32 = @truncate(index_writer.count - index);
                         size.split[1] = @max(size.split[1], right);
                     }
                 },
@@ -264,37 +265,106 @@ fn extractPlaceholder(comptime fmt: []const u8) []const u8 {
     return fmt[start + 1 .. end];
 }
 
-fn IndexOfWriter(comptime WriterType: type) type {
-    return struct {
-        scalar: u8,
-        first_index: ?usize = null,
-        bytes_written: usize,
-        child_stream: WriterType,
+const IndexOfWriter = struct {
+    scalar: u8,
+    first_index: ?usize,
+    count: usize,
+    interface: std.Io.Writer,
 
-        pub const Error = WriterType.Error;
-        pub const Writer = std.io.Writer(*Self, Error, write);
+    const Self = @This();
 
-        const Self = @This();
+    fn drain(
+        w: *std.Io.Writer,
+        data: []const []const u8,
+        splat: usize,
+    ) std.Io.Writer.Error!usize {
+        const self: *IndexOfWriter = @alignCast(@fieldParentPtr("interface", w));
 
-        pub fn write(self: *Self, bytes: []const u8) Error!usize {
+        if (self.first_index == null) {
+            if (std.mem.indexOfScalar(u8, w.buffered(), self.scalar)) |index| {
+                self.first_index = self.count + index;
+            }
+        }
+
+        const slice = data[0 .. data.len - 1];
+        const pattern = data[slice.len];
+
+        var written: usize = 0;
+
+        for (slice) |bytes| {
             if (self.first_index == null) {
                 if (std.mem.indexOfScalar(u8, bytes, self.scalar)) |index| {
-                    self.first_index = self.bytes_written + index;
+                    self.first_index = self.count + written + index;
                 }
             }
-            const amt = try self.child_stream.write(bytes);
-            self.bytes_written += amt;
-            return amt;
+            written += bytes.len;
         }
+        if (self.first_index == null) {
+            if (std.mem.indexOfScalar(u8, pattern, self.scalar)) |index| {
+                self.first_index = self.count + written + index;
+            }
+        }
+        written += pattern.len * splat;
+        self.count += w.end + written;
+        w.end = 0;
+        return written;
+    }
 
-        pub fn writer(self: *Self) Writer {
-            return .{ .context = self };
-        }
+    pub fn init(scalar: u8, buffer: []u8) IndexOfWriter {
+        return .{
+            .scalar = scalar,
+            .first_index = null,
+            .count = 0,
+            .interface = .{
+                .vtable = &vtable,
+                .buffer = buffer,
+            },
+        };
+    }
+
+    const vtable: std.Io.Writer.VTable = .{
+        .drain = drain,
+        .rebase = std.Io.Writer.failingRebase,
     };
-}
+};
 
-fn indexOfWriter(child_stream: anytype, scalar: u8) IndexOfWriter(@TypeOf(child_stream)) {
-    return .{ .scalar = scalar, .bytes_written = 0, .child_stream = child_stream };
-}
+test format {
+    const spec = [_]Column{
+        .{ .fmt = "{d}", .header = "num", .alignment = .{ .separator = '.' } },
+        .{ .fmt = "{s}", .header = "string", .alignment = .right },
+        .{ .fmt = "{s}", .header = "centered", .alignment = .middle },
+    };
 
+    const data = [_]struct { f32, []const u8, []const u8 }{
+        .{
+            123.43,
+            "hi there, right aligned?",
+            "is this centered?",
+        },
+        .{
+            12345.43,
+            "checking...",
+            "is it?",
+        },
+    };
+
+    const expected =
+        \\     num                string                 centered     
+        \\ ─────────────────────────────────────────────────────────────
+        \\     123.43    hi there, right aligned?    is this centered?
+        \\   12345.43                 checking...         is it?      
+        \\
+    ;
+
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+
+    try format(
+        &aw.writer,
+        &spec,
+        .{},
+        data,
+    );
+    try std.testing.expectEqualStrings(expected, aw.written());
+}
 const std = @import("std");
