@@ -162,7 +162,7 @@ pub fn formatRow(
                         width[i].split[1] - (index_writer.count - index),
                     };
                 } else {
-                    const total = width[i].split[0] + width[i].split[1] + 1;
+                    const total = width[i].split[0] + width[i].split[1];
                     const pad = total - index_writer.count;
                     break :blk .{ (pad + 1) / 2, pad / 2 };
                 }
@@ -207,9 +207,9 @@ pub fn measureColumns(comptime spec: []const Column, data: anytype) [spec.len]Co
 
         for (data) |d| {
             const arg_value = @field(d, fields_info[arg_pos].name);
-            const len: usize = @truncate(std.fmt.count(column.fmt, .{arg_value}));
             switch (column.alignment) {
                 .left, .middle, .right => {
+                    const len: usize = @truncate(std.fmt.count(column.fmt, .{arg_value}));
                     size.total = @max(size.total, len);
                 },
                 .separator => |sep| {
@@ -218,10 +218,14 @@ pub fn measureColumns(comptime spec: []const Column, data: anytype) [spec.len]Co
                     index_writer.interface.print(column.fmt, .{arg_value}) catch unreachable;
                     index_writer.interface.flush() catch unreachable;
 
+                    const count = index_writer.count;
+
                     if (index_writer.first_index) |index| {
                         size.split[0] = @max(size.split[0], @as(u32, @truncate(index)));
-                        const right: u32 = @truncate(index_writer.count - index);
+                        const right: u32 = @truncate(count - index);
                         size.split[1] = @max(size.split[1], right);
+                    } else {
+                        size.split[0] = @max(size.split[0], @as(u32, @truncate(count)));
                     }
                 },
             }
@@ -346,6 +350,11 @@ test format {
             "checking...",
             "is it?",
         },
+        .{
+            0,
+            "more text here",
+            "excellent",
+        },
     };
 
     const expected =
@@ -353,6 +362,7 @@ test format {
         \\ ─────────────────────────────────────────────────────────────
         \\     123.43    hi there, right aligned?    is this centered?
         \\   12345.43                 checking...         is it?      
+        \\       0                 more text here        excellent    
         \\
     ;
 
